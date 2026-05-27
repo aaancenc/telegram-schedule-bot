@@ -19,7 +19,7 @@ func main() {
 	}
 	defer conn.Close(ctx)
 
-	bot, err := tgbotapi.NewBotAPI("8902538391:AAHgbmZ6G38eg5gF4mmhByG2hjDyIhRAJ-M")
+	bot, err := tgbotapi.NewBotAPI("8902538391:AAFVBZTqLpfZ_FD9nM2Vvk5xsGTjfJIZXZc")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -28,6 +28,7 @@ func main() {
 	updateConfig.Timeout = 60
 
 	updates := bot.GetUpdatesChan(updateConfig)
+	selectedWeekByChat := make(map[int64]string)
 
 	for update := range updates {
 		if update.Message == nil {
@@ -35,63 +36,93 @@ func main() {
 		}
 
 		chatID := update.Message.Chat.ID
-		text := strings.ToLower(update.Message.Text)
+		text := strings.ToLower(strings.TrimSpace(update.Message.Text))
 
 		switch text {
-		case "/start":
-			sendWithKeyboard(bot, chatID, "Выбери день недели:")
-
-		case "/понедельник", "понедельник":
-			sendSchedule(ctx, bot, conn, chatID, "понедельник")
-
-		case "/вторник", "вторник":
-			sendSchedule(ctx, bot, conn, chatID, "вторник")
-
-		case "/среда", "среда":
-			sendSchedule(ctx, bot, conn, chatID, "среда")
-
-		case "/четверг", "четверг":
-			sendSchedule(ctx, bot, conn, chatID, "четверг")
-
-		case "/пятница", "пятница":
-			sendSchedule(ctx, bot, conn, chatID, "пятница")
-
-		case "/суббота", "суббота":
-			sendSchedule(ctx, bot, conn, chatID, "суббота")
-
-		case "/воскресенье", "воскресенье":
-			sendSchedule(ctx, bot, conn, chatID, "воскресенье")
+		case "/start", "выбрать неделю", "/выбрать_неделю":
+			delete(selectedWeekByChat, chatID)
+			sendWeekSelection(bot, chatID, "Выбери неделю:")
 
 		default:
-			sendWithKeyboard(bot, chatID, "Неизвестная команда. Выбери день недели:")
+			if week, ok := parseWeek(text); ok {
+				selectedWeekByChat[chatID] = week
+				sendDaySelection(bot, chatID, "Выбери день недели:")
+				continue
+			}
+
+			day, ok := parseDay(text)
+			if !ok {
+				sendWeekSelection(bot, chatID, "Неизвестная команда. Выбери неделю:")
+				continue
+			}
+
+			week, ok := selectedWeekByChat[chatID]
+			if !ok {
+				sendWeekSelection(bot, chatID, "Сначала выбери четную или нечетную неделю:")
+				continue
+			}
+
+			sendSchedule(ctx, bot, conn, chatID, day, week)
 		}
 	}
 }
 
-func sendSchedule(ctx context.Context, bot *tgbotapi.BotAPI, conn *pgx.Conn, chatID int64, day string) {
-	answer, err := GetScheduleByDay(ctx, conn, day)
+func parseWeek(text string) (string, bool) {
+	switch text {
+	case "/четная", "четная", "четная неделя":
+		return "четная", true
+	case "/нечетная", "нечетная", "нечетная неделя", "нечётная", "нечётная неделя":
+		return "нечетная", true
+	default:
+		return "", false
+	}
+}
+
+func parseDay(text string) (string, bool) {
+	switch text {
+	case "/понедельник", "понедельник":
+		return "понедельник", true
+	case "/вторник", "вторник":
+		return "вторник", true
+	case "/среда", "среда":
+		return "среда", true
+	case "/четверг", "четверг":
+		return "четверг", true
+	case "/пятница", "пятница":
+		return "пятница", true
+	case "/суббота", "суббота":
+		return "суббота", true
+	case "/воскресенье", "воскресенье":
+		return "воскресенье", true
+	default:
+		return "", false
+	}
+}
+
+func sendSchedule(ctx context.Context, bot *tgbotapi.BotAPI, conn *pgx.Conn, chatID int64, day string, week string) {
+	answer, err := GetSchedule(ctx, conn, day, week)
 	if err != nil {
-		sendWithKeyboard(bot, chatID, "Ошибка при получении расписания")
+		sendDaySelection(bot, chatID, "Ошибка при получении расписания")
 		return
 	}
 
-	sendWithKeyboard(bot, chatID, answer)
+	sendDaySelection(bot, chatID, answer)
 }
 
-func GetScheduleByDay(ctx context.Context, conn *pgx.Conn, day string) (string, error) {
+func GetSchedule(ctx context.Context, conn *pgx.Conn, day string, week string) (string, error) {
 	rows, err := conn.Query(ctx, `
 		SELECT time, subject, teacher, room
 		FROM schedule
-		WHERE day = $1
+		WHERE day = $1 AND week_type = $2
 		ORDER BY time
-	`, day)
+	`, day, week)
 	if err != nil {
 		return "", err
 	}
 	defer rows.Close()
 
 	var result strings.Builder
-	result.WriteString("Расписание на " + day + ":\n\n")
+	result.WriteString("Расписание на " + day + " (" + week + " неделя):\n\n")
 
 	found := false
 
@@ -122,15 +153,23 @@ func GetScheduleByDay(ctx context.Context, conn *pgx.Conn, day string) (string, 
 	}
 
 	if !found {
-		return "На " + day + " расписания нет", nil
+		return "На " + day + " (" + week + " неделя) расписания нет", nil
 	}
 
 	return result.String(), rows.Err()
 }
 
-func sendWithKeyboard(bot *tgbotapi.BotAPI, chatID int64, text string) {
+func sendWeekSelection(bot *tgbotapi.BotAPI, chatID int64, text string) {
+	sendWithKeyboard(bot, chatID, text, getWeekKeyboard())
+}
+
+func sendDaySelection(bot *tgbotapi.BotAPI, chatID int64, text string) {
+	sendWithKeyboard(bot, chatID, text, getDayKeyboard())
+}
+
+func sendWithKeyboard(bot *tgbotapi.BotAPI, chatID int64, text string, keyboard tgbotapi.ReplyKeyboardMarkup) {
 	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ReplyMarkup = getMainKeyboard()
+	msg.ReplyMarkup = keyboard
 
 	_, err := bot.Send(msg)
 	if err != nil {
@@ -138,7 +177,19 @@ func sendWithKeyboard(bot *tgbotapi.BotAPI, chatID int64, text string) {
 	}
 }
 
-func getMainKeyboard() tgbotapi.ReplyKeyboardMarkup {
+func getWeekKeyboard() tgbotapi.ReplyKeyboardMarkup {
+	keyboard := tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("Четная неделя"),
+			tgbotapi.NewKeyboardButton("Нечетная неделя"),
+		),
+	)
+
+	keyboard.ResizeKeyboard = true
+	return keyboard
+}
+
+func getDayKeyboard() tgbotapi.ReplyKeyboardMarkup {
 	keyboard := tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("Понедельник"),
@@ -154,6 +205,9 @@ func getMainKeyboard() tgbotapi.ReplyKeyboardMarkup {
 		),
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("Воскресенье"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("Выбрать неделю"),
 		),
 	)
 
